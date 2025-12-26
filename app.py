@@ -48,6 +48,15 @@ def local_css():
             color: white;
             box-shadow: 0 0 10px #4da6ff;
         }
+        /* Late Task Warning */
+        .late-task {
+            color: #ff4b4b;
+            font-weight: bold;
+        }
+        .due-today {
+            color: #ffa500;
+            font-weight: bold;
+        }
         [data-testid="stSidebar"] img {
             border-radius: 10px;
             box-shadow: 0 0 15px #4da6ff;
@@ -166,7 +175,6 @@ def save_current_user(username):
         json.dump(all_data, f)
 
 def admin_save_target_user(target_username, target_data):
-    """Saves data for a user other than the one currently logged in"""
     all_data = load_all_data()
     all_data[target_username] = target_data
     with open(SAVE_FILE, "w") as f:
@@ -184,7 +192,7 @@ selected_user = st.sidebar.selectbox("Select Character:", user_list)
 if 'current_user' not in st.session_state or st.session_state.current_user != selected_user:
     st.session_state.current_user = selected_user
     user_data = all_data.get(selected_user, init_user_data(selected_user))
-    # Ensure Shop exists for old saves
+    # Migration checks
     if "shop" not in user_data: user_data["shop"] = FAMILY_TEMPLATES[selected_user]["shop"]
     if "attributes" in user_data and "Gold" not in user_data["attributes"]: user_data["attributes"]["Gold"] = 0
     
@@ -291,8 +299,6 @@ def get_previous_log(exercise_name):
 
 # --- NAVIGATION ---
 menu_options = ["🏠 Dashboard", "🔥 Quest Board", "💰 Market", "🎒 Inventory", "🌳 Legacy Skills", "🏋️ Gym", "📜 History"]
-
-# --- ADMIN PANEL CHECK ---
 is_admin = "Dad" in st.session_state.current_user or "Mom" in st.session_state.current_user
 if is_admin:
     menu_options.append("👑 Admin Panel")
@@ -305,7 +311,6 @@ total_xp = sum(st.session_state.xp.values())
 player_level = total_xp // 100 + 1
 rank_title = get_rank(total_xp)
 
-# Image Logic
 prefix = ROLE_PREFIXES.get(st.session_state.current_user, "dad")
 suffix = RANK_SUFFIXES.get(rank_title, "rank_e")
 image_file = f"{prefix}_{suffix}.png"
@@ -317,7 +322,6 @@ else:
     fallback = os.path.join("assets", f"{prefix}_rank_e.png")
     if os.path.exists(fallback):
         st.sidebar.image(fallback, caption=f"{st.session_state.current_user}")
-        st.sidebar.caption(f"(Unlock {suffix} to evolve!)")
     else:
         st.sidebar.warning(f"⚠️ Missing: {image_file}")
 
@@ -384,11 +388,10 @@ if menu == "🏠 Dashboard":
             else: st.info("Log your weight to see the chart.")
 
 # =========================================================
-#  ZONE 2: QUEST BOARD
+#  ZONE 2: QUEST BOARD (UPDATED WITH DUE DATES)
 # =========================================================
 elif menu == "🔥 Quest Board":
     st.title("⚡ Daily Quests")
-    # Only Admin (Mom/Dad) can add tasks here, or use Admin Panel
     
     st.subheader("🔁 Habits (+5 Gold)")
     if st.session_state.habits:
@@ -411,17 +414,44 @@ elif menu == "🔥 Quest Board":
                             save_current_user(st.session_state.current_user)
                             st.rerun()
 
-    st.subheader("📜 Tasks (+25 Gold)")
+    st.subheader("📜 Assigned Tasks (Check Due Dates)")
     if not st.session_state.one_time_tasks:
-        st.info("No active tasks assigned by Monarch/Healer.")
+        st.info("No active tasks.")
     
     for i, task in enumerate(st.session_state.one_time_tasks):
         if not task["done"]:
-            if st.button(f"⬜ {task['name']} (+40 {task['stat']} | +25 GP)", key=f"ot_{i}"):
+            # Due Date Logic
+            due_str = task.get("due_date", str(datetime.date.today()))
+            due_date = datetime.datetime.strptime(due_str, "%Y-%m-%d").date()
+            today = datetime.date.today()
+            
+            # Label
+            label = f"⬜ {task['name']}"
+            note = f"+40 {task['stat']}"
+            gold_reward = 25
+            
+            if due_date < today:
+                label += " (LATE)"
+                note += " | 🚨 OVERDUE (-15 GP Penalty)"
+                gold_reward = 10 # Late penalty
+                color_class = "late-task"
+            elif due_date == today:
+                label += " (DUE TODAY)"
+                note += " | ⚠️ Due Today!"
+                color_class = "due-today"
+            else:
+                note += f" | 📅 Due: {due_str}"
+                color_class = "normal"
+
+            if st.button(f"{label} \n {note}", key=f"ot_{i}", use_container_width=True):
                 st.session_state.one_time_tasks[i]["done"] = True
                 old_xp = st.session_state.xp[task['stat']]
                 st.session_state.xp[task['stat']] += 40
-                st.session_state.attributes["Gold"] += 25
+                st.session_state.attributes["Gold"] += gold_reward
+                
+                status_msg = "LATE" if gold_reward == 10 else "ON TIME"
+                st.session_state.completed_history.append(f"{datetime.date.today()} - Task: {task['name']} ({status_msg}) (+{gold_reward} GP)")
+                
                 check_level_up(task['stat'], old_xp, st.session_state.xp[task['stat']])
                 save_current_user(st.session_state.current_user)
                 st.rerun()
@@ -611,30 +641,52 @@ elif menu == "📜 History":
         st.text(entry)
 
 # =========================================================
-#  ZONE 8: ADMIN PANEL (NEW)
+#  ZONE 8: ADMIN PANEL (UPDATED)
 # =========================================================
 elif menu == "👑 Admin Panel" and is_admin:
     st.title("👑 Monarch's Decree")
-    st.info("Assign tasks and rewards to your Guild members.")
     
-    # Select Target
     target_user = st.selectbox("Select Target User", user_list)
-    
-    # Load that user's data privately
     target_data = all_data.get(target_user, init_user_data(target_user))
     
-    tab1, tab2 = st.tabs(["📝 Assign Task", "💰 Add Market Item"])
+    tab1, tab2, tab3 = st.tabs(["📝 Assign Task", "💰 Manage Market", "✏️ Edit Habits"])
     
     with tab1:
         with st.form("assign_task"):
             t_name = st.text_input("Task Name (e.g. Mow Lawn)")
             t_stat = st.selectbox("Stat Reward", list(target_data["xp"].keys()))
+            t_due = st.date_input("Due Date", value=datetime.date.today())
             if st.form_submit_button("Assign Task"):
-                target_data["one_time_tasks"].append({"name": t_name, "stat": t_stat, "done": False})
+                target_data["one_time_tasks"].append({
+                    "name": t_name, 
+                    "stat": t_stat, 
+                    "done": False,
+                    "due_date": str(t_due)
+                })
                 admin_save_target_user(target_user, target_data)
-                st.success(f"Assigned '{t_name}' to {target_user}!")
+                st.success(f"Assigned '{t_name}' to {target_user} due {t_due}!")
     
     with tab2:
+        st.write(f"Editing Market for: **{target_user}**")
+        # List Existing Market Items
+        if target_data["shop"]:
+            items_to_del = []
+            for item_name, item_price in target_data["shop"].items():
+                c1, c2 = st.columns([3, 1])
+                c1.info(f"{item_name} ({item_price} GP)")
+                if c2.button("🗑️", key=f"del_shop_{item_name}"):
+                    items_to_del.append(item_name)
+            
+            if items_to_del:
+                for it in items_to_del:
+                    del target_data["shop"][it]
+                admin_save_target_user(target_user, target_data)
+                st.rerun()
+        else:
+            st.warning("Market is empty.")
+            
+        st.divider()
+        st.write("Add New Stock")
         with st.form("add_shop"):
             s_name = st.text_input("Reward Name (e.g. Concert Ticket)")
             s_price = st.number_input("Gold Cost", min_value=10, step=10)
@@ -642,3 +694,30 @@ elif menu == "👑 Admin Panel" and is_admin:
                 target_data["shop"][s_name] = s_price
                 admin_save_target_user(target_user, target_data)
                 st.success(f"Added '{s_name}' to {target_user}'s Market!")
+                st.rerun()
+                
+    with tab3:
+        st.write(f"Editing Habits for: **{target_user}**")
+        # List Current Habits
+        habits_to_delete = []
+        for h, v in target_data["habits"].items():
+            c1, c2 = st.columns([3, 1])
+            c1.info(f"{h} (+15 {v[0]})")
+            if c2.button("🗑️", key=f"del_{h}"):
+                habits_to_delete.append(h)
+        
+        if habits_to_delete:
+            for h in habits_to_delete:
+                del target_data["habits"][h]
+            admin_save_target_user(target_user, target_data)
+            st.rerun()
+            
+        st.divider()
+        with st.form("new_habit"):
+            h_name = st.text_input("New Habit Name (e.g. Walk Dog)")
+            h_stat = st.selectbox("Attribute", ["Strength", "Agility", "Vitality", "Intellect", "Spirit", "Sense"])
+            if st.form_submit_button("Create Habit"):
+                target_data["habits"][h_name] = [h_stat, None]
+                admin_save_target_user(target_user, target_data)
+                st.success(f"Created habit: {h_name}")
+                st.rerun()
